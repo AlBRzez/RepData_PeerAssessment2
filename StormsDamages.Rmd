@@ -1,0 +1,279 @@
+---
+title: "Weather events, population health and economic damages"
+author: "Aliza Brzezinski Rittner"
+output: 
+        html_document:
+                toc: TRUE
+---
+```{r, setup}
+Sys.setlocale("LC_TIME", "C") 
+
+knitr::opts_chunk$set(
+	eval = TRUE,
+	echo = TRUE,
+	include = TRUE, 
+	cache = TRUE,
+	results = 'markup',
+	fig.height=5, fig.width=10
+) 
+
+options(scipen = 1, digits = 6)
+```  
+
+```{r libs, message=FALSE, warning=FALSE}
+if(!require(tidyverse)){
+        install.packages("tidyverse")
+        library(tidyverse)
+}
+
+
+if(!require(lubridate)){
+        install.packages("lubridate")
+        library(lubridate)
+}
+        
+if(!require(data.table)){
+        install.packages("data.table")
+        library(data.table)
+}
+
+if(!require(wesanderson)){
+        install.packages("wesanderson")
+        library(wesanderson)
+}
+```  
+
+# Synopsis
+
+The goal of this project is to study the influence of some weather events on the USA population's health (measured by the number of deaths and injuries caused by the metheorologycal events) and on the economy (measured by the damage caused in crops and property.)
+
+The data comes from the the U.S. National Oceanic and Atmospheric Administration’s (NOAA) storm database.  
+
+```{r get.data}
+path <- getwd()
+if(!file.exists("./stormData.csv.bz2")) {
+        dataUrl <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+        download.file(dataUrl, file.path(path,"stormData.csv.bz2"))
+}
+
+Storm.Data <- fread("./stormData.csv.bz2")
+Storm.Data <- as_tibble(Storm.Data)
+```  
+
+
+# Data Processing
+The first step to do the analysis is to clean and tidy the data in order for it to be used for future analysis.  
+
+## Data exploration
+```{r EDA}
+dim.ST <- dim(Storm.Data)
+nas.ST <- sum(is.na(Storm.Data))
+head(Storm.Data)
+```  
+The data frame has `r dim.ST[2]` variables and `r dim.ST[1]` registers. There are `R as.numeric(nas.ST)` from the total `r dim.ST[1] * dim.ST[2]` datapoints.
+
+## Data selection
+We'll keep just the following variables:  
+
+- EVTYPE: indicates the type of metheorological event
+- BGN_DATE: date when the event began
+- The ones related to population health
+  - FATALITIES
+  - INJURIES
+- The ones related to the economic consecuences
+  - CROPDMG: crop damage
+    - CROPDMGEXP: exponent values for 'CROPDMG'
+  - PROPDMG: property damage
+    - PROPDMGEXP: exponent values for 'PROPDMG'  
+
+Afterwards, I'll keep only the values recorded during or after 1996, since it was on that year that the NOAA started recording all event types (information taken from this [post](https://www.coursera.org/learn/reproducible-research/discussions/weeks/4/threads/38y35MMiEeiERhLphT2-QA).  
+
+```{r subset}
+Storm.Data$BGN_DATE <- as.Date(Storm.Data$BGN_DATE, format = "%m/%d/%Y")
+Storm.Data <- Storm.Data %>% 
+        select(EVTYPE, BGN_DATE, FATALITIES, INJURIES, CROPDMG, CROPDMGEXP, PROPDMG, PROPDMGEXP) %>% 
+        filter(BGN_DATE >= as.Date("1996-01-01"))
+
+dim.ST <- dim(Storm.Data)
+nas.ST <- sum(is.na(Storm.Data))
+head(Storm.Data)
+```  
+The new data frame has `r dim.ST[2]` variables and `r dim.ST[1]` registers. There are `R as.numeric(nas.ST)` from the total `r dim.ST[1] * dim.ST[2]` datapoints.  
+
+Since we want to know the effect that the different events have on health and economics, we'll remove all the registers that doesn't report any kind of damage.
+
+```{r remove.incomplete}
+Storm.Data.SD <- Storm.Data %>% 
+        filter(!(FATALITIES == 0 & INJURIES == 0 & CROPDMG == 0 & PROPDMG == 0))
+
+dim.ST.SD <- dim(Storm.Data.SD)
+head(Storm.Data.SD)
+rm(Storm.Data)
+```  
+```{r fill.strings}
+Storm.Data.SD <- as_tibble(sapply(Storm.Data.SD , gsub , pattern = "^\\s*$" , replacement = 0))
+nums <- c("FATALITIES", "INJURIES", "CROPDMG", "PROPDMG")
+Storm.Data.SD[,nums] = apply(Storm.Data.SD[,nums], 2, function(x) as.numeric(as.character(x)))
+```  
+
+Now this data frame contains  `r dim.ST.SD[1]` registers.  
+
+## Data transformation
+The next step is to transform the crop and property damage variables into meaningfull values. The values in the **CROPDMG** or the **PROPDMG** will be multiplied according to the following rules, depending on the value in the respective "exp" variable (either the **CROPDMGEXP** or the **PROPDMGEXP**):  
+
+- If it's a number, it will be multiplied by **10**
+- If it's "H/h" (hundreds) it will be multiplied by **100**
+- If it's "K,k" (kilos = thousands), it will be multiplied by **1,000**
+- If it's "M,m" (millions), it will be multiplied by **1,000,000**
+- If it's "B,b" (billions), it will be multiplied by **1,000,000,000**      
+
+```{r dmg.transform}
+damages.factor <- function(dmg, exponent) {
+        damage <- 0
+        if (exponent == "0" || exponent == "+" || exponent == "-" || exponent == "?") {
+                damage <-(dmg)
+        }
+        else if (exponent %in% c(1:9)) {
+                damage <-((dmg)*10)
+        }
+        else if(exponent == "H" || exponent == "h") {
+                damage <-((dmg)*100)
+        }
+        else if(exponent == "K" || exponent == "k") {
+                damage <-((dmg)*1000)
+        }
+        else if(exponent == "M" || exponent == "m") {
+                damage <-((dmg)*10^6)
+        }
+        else if(exponent == "B" || exponent == "b") {
+                damage <-((dmg)*10^9)
+        }
+        return(damage)
+}
+ 
+damages.factorV <- Vectorize(damages.factor)
+
+Storm.Data.SD$CDMG <- damages.factorV(Storm.Data.SD$CROPDMG, Storm.Data.SD$CROPDMGEXP)
+
+Storm.Data.SD$PDMG <- damages.factorV(Storm.Data.SD$PROPDMG, Storm.Data.SD$PROPDMGEXP)
+
+```  
+
+The next preprocessing step is to homogenize the names of the event types since there are many typos in the dataset and there should be only 48 different events.  
+
+```{r evtype.fix}
+Storm.Data.SD$EVTYPE <- toupper(Storm.Data.SD$EVTYPE)
+unique.events <- unique(Storm.Data.SD$EVTYPE)
+or.event <- length(unique.events)
+Storm.Data.SD <- Storm.Data.SD %>% filter(!(EVTYPE == "OTHER")) %>%
+        mutate(EVTYPE = trimws(EVTYPE)) %>%   # trim whitespace inconsistencies
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, "THUNDERSTORM|TSTM.*"), "THUNDERSTORM WIND", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*MICROBURST.*"), "THUNDERSTORM WIND", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*DRY.*"), "DROUGHT", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*BLIZZARD.*"), "BLIZZARD", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*CHILL.*"), "EXTREME COLD/WIND CHILL", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*EXTREME.*COLD.*"), "EXTREME COLD/WIND CHILL", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*COLD.*"), "EXTREME COLD/WIND CHILL", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*WINTER.*"), "WINTER STORM", EVTYPE)) %>%
+         mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*SURF.*"), "HIGH SURF", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*FIRE.*"), "WILDFIRE", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*WATER.*SPOUT.*"), "WATERSPOUT", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*FREEZING.*RAIN.*"), "WINTER STORM", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*SNOW.*"), "WINTER STORM", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*FLASH.*FLOOD.*"), "FLASH FLOOD", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*FLOOD.*"), "FLOOD", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*FLD.*"), "FLOOD", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*TORNADO.*"), "TORNADO", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*HAIL.*"), "HAIL", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*WARM.*"), "HEAT", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*HURRICANE.*"), "HURRICANE (TYPHOON)", EVTYPE)) %>%
+         mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*TYPHOON.*"), "HURRICANE (TYPHOON)", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*ICE.*"), "ICE STORM", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*ICY.*"), "ICE STORM", EVTYPE)) %>%
+        mutate(EVTYPE = if_else(str_detect(EVTYPE, ".*ASTRONOMICAL*."), "ASTRONOMICAL LOW TIDE", EVTYPE)) %>%
+        filter(str_detect(EVTYPE, ".*MIX.*", negate = TRUE))  
+
+f.event <- length(unique(Storm.Data.SD$EVTYPE))
+```  
+
+Due to the typos, we had `r or.event` different event types. With the transformation, we still have `r f.event` different event types, more than the 48 original event types, however, it's very complicated to determine to which category some of the typos belong. We'll do the rest of the analysis with the database as it currently is. Also since we want to know which elements are the ones that cause more damage, it's unlikely that given that many of the events occured hundreds or even thousends of times, the greater damage will be reprsented by some of the ones containing typos.  
+
+# Analysis  
+The first step is to summarize the total damages generated by each kind of event. Then, we'll create  a different data frame with the 10 highest values for each kind of damage in order to be able to visualize which type of event creates more damage for each category.
+```{r summarize}
+effects <- Storm.Data.SD %>%
+        group_by(EVTYPE) %>%
+        summarize(TIMES = n(),
+                  FATALITIES = sum(FATALITIES),
+                  INJURIES = sum(INJURIES),
+                  CROPDMG = sum(CDMG),
+                  PROPDMG = sum(PDMG))
+
+fatalities.df <- effects %>%
+        select(EVTYPE, FATALITIES) %>%
+        arrange(desc(FATALITIES)) %>%
+        slice(1:10) 
+
+injuries.df <- effects %>%
+        select(EVTYPE, INJURIES) %>%
+        arrange(desc(INJURIES)) %>%
+        slice(1:10)
+
+health.df <- merge(fatalities.df, injuries.df, by = "EVTYPE", all = TRUE)
+health.df <- pivot_longer(health.df, cols = c("FATALITIES", "INJURIES"), 
+                          names_to = "Damage", values_to = "Amount")
+
+cropdmg.df <- effects %>%
+        select(EVTYPE, CROPDMG) %>%
+        arrange(desc(CROPDMG)) %>%
+        slice(1:10)
+
+propdmg.df <- effects %>%
+        select(EVTYPE, PROPDMG) %>%
+        arrange(desc(PROPDMG)) %>%
+        slice(1:10)
+
+economic.df <- merge(cropdmg.df, propdmg.df, by = "EVTYPE", all = TRUE)
+economic.df <- pivot_longer(economic.df, cols = c("CROPDMG", "PROPDMG"), 
+                            names_to = "Damage", values_to = "Losses")
+```
+
+
+# Results  
+```{r plots, warning=FALSE}
+health.plot <- ggplot(health.df, aes(x = EVTYPE, y = Amount, fill = Damage)) +     
+        geom_bar(stat = "identity", position = "dodge") +
+        coord_flip() +
+        ggtitle("Health damages") +
+        xlab("Event type") +
+        scale_fill_manual(values=wes_palette(n=2, name="Darjeeling1")) +
+        theme_bw()
+
+economic.plot <- ggplot(economic.df, aes(x = EVTYPE, y = Losses, fill = Damage)) +
+        geom_bar(stat = "identity", position = "dodge") +
+        coord_flip() +
+        ggtitle("Economic damages") +
+        xlab("Event type") +
+        ylab("Losses in dolars") +
+        scale_fill_manual(values=wes_palette(n=2, name="Darjeeling1")) +
+        theme_bw()
+```
+
+## Health damages
+The answer to the question about which types of events are most harmful with respect to population health can be visualized in the following plot which indicates the amout of fatalities and injuries caused by each one of the selected events:  
+
+```{r plotting.health, warning = FALSE}
+health.plot
+```  
+
+It can be seen that even when **excessive heat** is the event that causes more fatalities, overall the event that causes more damages to population's health are the **tornados**, followed by the **floods**. Overall, this three types of events are the ones that causes more fatalities and injuries.   
+
+## Economic consequences
+
+The answer to the question about which types of events have the greatest economic consequences can be visualized in the following plot which indicates the economic losses caused in crops and properties by each one of the selected events:  
+
+```{r plotting.economic, warning = FALSE}
+economic.plot
+```  
+
+The event that causes more damage to properties are the **floods**, followed by **hurricanes**. Regarding the crops, the most damaging event are the **droughts** followed by the **floods**; overall, the event that causes the greater amount of economic consecuences are the **floods**. 
